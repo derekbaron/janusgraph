@@ -14,9 +14,8 @@
 
 package org.janusgraph.diskstorage.keycolumnvalue.cache;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import com.google.common.base.Preconditions;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
 import org.janusgraph.core.JanusGraphException;
 import org.janusgraph.diskstorage.*;
 import org.janusgraph.diskstorage.keycolumnvalue.*;
@@ -62,14 +61,11 @@ public class ExpirationKCVSCache extends KCVSCache {
         final int concurrencyLevel = Runtime.getRuntime().availableProcessors();
         Preconditions.checkArgument(invalidationGracePeriodMS >=0,"Invalid expiration grace period: %s", invalidationGracePeriodMS);
         this.invalidationGracePeriodMS = invalidationGracePeriodMS;
-        CacheBuilder<KeySliceQuery,EntryList> cachebuilder = CacheBuilder.newBuilder()
-                .maximumWeight(maximumByteSize)
-                .concurrencyLevel(concurrencyLevel)
-                .initialCapacity(1000)
-                .expireAfterWrite(cacheTimeMS, TimeUnit.MILLISECONDS)
-                .weigher((keySliceQuery, entries) -> GUAVA_CACHE_ENTRY_SIZE + KEY_QUERY_SIZE + entries.getByteSize());
+        cache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
+            .maximumSize(maximumByteSize)
+            .initialCapacity(1000)
+            .expireAfterWrite(this.cacheTimeMS, TimeUnit.MILLISECONDS).build();
 
-        cache = cachebuilder.build();
         expiredKeys = new ConcurrentHashMap<>(50, 0.75f, concurrencyLevel);
         penaltyCountdown = new CountDownLatch(PENALTY_THRESHOLD);
 
@@ -86,9 +82,14 @@ public class ExpirationKCVSCache extends KCVSCache {
         }
 
         try {
-            return cache.get(query, () -> {
+            return cache.get(query, (q) -> {
                 incActionBy(1, CacheMetricsAction.MISS,txh);
-                return store.getSlice(query, unwrapTx(txh));
+                try {
+                    return store.getSlice(query, unwrapTx(txh));
+                }
+                catch (BackendException be) {
+                    throw new JanusGraphException(be);
+                }
             });
         } catch (Exception e) {
             if (e instanceof JanusGraphException) throw (JanusGraphException)e;
